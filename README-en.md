@@ -1,5 +1,15 @@
 # dsh-todo-float-ball-plus
 
+**[中文](README.md) | English**
+
+> **Fork notice**: this is a derivative of [`loyalchiiina/dsh-todo-float-ball`](https://github.com/loyalchiiina/dsh-todo-float-ball) (MIT) **0.14.7**, not an upstream release. Upstream npm is 0.14.12; **the later 5 patches are not merged**.
+> Local additions: a global multi-session task view, token throughput, per-session metadata, calibrated ETA with overtime display, and a hard gate that makes `todo_write` the first tool call of every turn (upstream has no such gate — it is the main reason this fork exists).
+> Do **not** install it together with the upstream plugin (same ball, same ids). Original MIT copyright preserved in `LICENSE`; modifications (c) 2026 baiqiuzhang.
+
+```
+dsh plugin --profile desktop add https://github.com/baiqiuzhang/dsh-todo-float-ball-plus/releases/download/v0.1.0/dsh-todo-float-ball-plus-0.1.0.tgz
+```
+
 **Your AI agent runs long tasks — but its plan keeps scrolling out of sight. Turn it into a progress ball that never leaves the screen.**
 **让 AI 的任务清单常驻屏幕 —— DeepSeek Harness（DSH）进度悬浮球插件。**
 

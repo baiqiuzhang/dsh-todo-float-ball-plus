@@ -1,5 +1,7 @@
 # dsh-todo-float-ball-plus
 
+**[English](README-en.md) | 中文**
+
 > **衍生版声明**：本项目是 [`loyalchiiina/dsh-todo-float-ball`](https://github.com/loyalchiiina/dsh-todo-float-ball)（MIT）**0.14.7** 的派生版本，不是上游官方发布。
 > 上游仍在维护（npm 最新 0.14.12），本分支基于 0.14.7，**未合并后续 5 个 patch**。
 > 本地增强：多会话全局任务视图、token 吞吐、per-session 元数据、ETA 分段校准与超时显示、以及 `todo_write` 首调用**硬 gate**（上游无此项，也是本分支存在的主要理由）。
