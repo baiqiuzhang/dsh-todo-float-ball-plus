@@ -1,0 +1,1253 @@
+# Changelog
+
+## 0.14.7 — 2026-10-29
+
+### ✨ 新增
+
+- **官方主题皮肤（129 官方深色 / 130 官方浅色）**：与 DSH 界面同色系，选到即由皮肤强制决定字色，按钮呈锁定态——官方皮肤本身自带正确对比度，不允许也不需要用 ◐ 手动覆盖。
+- **0 · 随系统 · 深/浅自动**：跟随 `prefers-color-scheme`，系统切深浅色时球和面板实时跟着切（解析到官方深色或官方浅色）。
+- **三球皮肤同步开关**：皮肤菜单首行。**勾选 = 跟随全局皮肤**（三球同款，改一个三个一起变）；**不勾 = 本球独立皮肤**，全局换肤不动它。经典（旧版）皮肤改为各球独立开关，不再写全局键。
+- **强制字色（◐ 自动 → 黑 → 白）**：作用于面板内外所有文字（球面标签、任务行、折叠行、提示语），解决浅色皮肤白字看不清 / 深色皮肤黑字看不清。
+- **设置页「悬浮球导航」分区**（由姊妹插件 `dsh-skill-browser` 注册的共用分区）：三球显隐、皮肤下拉、◎ 回到右下角、作者插件清单。
+- **标题栏按钮全部改为黑白线性 SVG 图标**（`stroke: currentColor` 跟随字色，不再用 emoji）：布局切换 / 固定会话 / 归位 / 皮肤 / 字色 / 折叠 / Star。
+
+### 🔴 修复
+
+- **拖到屏幕顶部就点不动**：球、面板、皮肤菜单统一补 `app-region: no-drag`。DSH 桌面端窗口顶部约 40px 是 Electron 拖拽带，落在上面的球会被窗口拖拽逻辑吃掉全部鼠标事件——看着在、实际已经"死"了。
+- 修复皮肤计数与实际目录不一致（`128` → 实测 `130`：官方主题 2 + 招牌特效 20 + 克制精选 8 + 100 款公式配色）。
+- 修复「经典（旧版）皮肤」误写全局 `dsh-ball-skin` 键导致另两个球被关联解析成官方皮肤的问题；旧数据自动迁移。
+
+### 📝 文档
+
+- README 全中文重写（`README.md` 为主文档，`README-en.md` 英文版），新增「适配版本」节：DSH 内核 0.2.1-rc.3 / 桌面端 2.0.20-next 实测通过。
+- 效果图整体替换为 3 张新图（皮肤菜单 + 悬浮球 / 胶囊态 + 面板展开 / 设置页悬浮球导航），删除 4 张过期旧图。
+- npm 包体排除 `lib/*.bak-*` 开发备份（原会带入 40 个文件约 7MB）。
+## 0.14.6 — 2026-10-19
+
+### 🔴 修复：悬浮球进度与官方 todo 面板不一致（球显示 9/18，官方只有 6 条 / 0 完成）
+
+**症状**：官方面板显示 6 条任务（1 进行中 · 5 待处理，0 完成），悬浮球却显示 `9/18`；
+完成数与总数双双偏大，且越用越离谱，重启也不恢复。
+
+**根因**（`lib/client.js` 快照边界 `snapLen`）：
+2026-09-28 为避免球在 `0/1 -> 7/9 -> 0/1` 之间闪烁，把 `snapLen` 改成了
+单调递增的高水位 `Math.min(Math.max(prevSnap, norm.length), merged.length)`。
+它只增不减：一旦被某一轮长计划顶到 18，后续每一轮都把旧计划的行走当成
+live 任务统计 —— `todos.slice(0, snapLen)` 里混进了上一轮 font-enhancer 的 12 条历史任务。
+
+**修复**：权威通道的一帧就是当前计划的全部（`todo_write` 是整表替换），
+因此 `snapLen = norm.length`，其后的合并项即为历史。DOM fallback 仍然不抬高边界，
+且服务端已给出边界时不再用它。
+
+当年那个闪烁的**真实来源**已被别处掐断：`readOfficialPanel()` 现在一开头就用
+`hasPrimaryData()` 检查，权威通道已发声的会话直接 return，不会再往这里写一行的「plan」。
+
+**验证**（真机探针，日志 `[tfb3]`）：
+```
+FRAME norm=6 prevSnap=18 merged=100 snapLen=6 fallback=false
+FINAL snapLen=6 merged=100 ball={"cls":"tfb-active","label":"0/6"}
+official="1 进行中 · 5 待处理" -> done=0 total=6
+MATCH=true
+```
+修复前同一探针输出为 `label:"9/18"`、`MATCH=false`。
+
+> 顺带记录一次走错的路：第一版修复用「本帧内容是否为旧窗口的子集」判定计划是否更替。
+> 该判据在**追加式合并**的数据结构上恒为真（旧窗口本已含有本帧的行），
+> 实测完全无法收缩边界。已回退。
+
+### 🔴 修复：热重载后新实例画不出 UI，屏幕上是已死实例留下的旧数字
+
+**症状**：`snapLen` 修好、数据层实测 `ballState()` 已返回 `7/12`（与官方 12 条完全一致），
+但屏幕上那个胶囊仍然显示 `11/18`，反复硬重载也不变。
+
+**根因**（`lib/client.js` 的 `buildUI()`）：
+```js
+if (document.getElementById(BALL_ID)) return;   // ← 旧守卫
+```
+热重载（`Ctrl+Shift+R`）不会卸载上一次实例创建的那个 `#dsh-tfb-root` shadow host。
+新实例进 `buildUI()` 时发现 id 已存在就直接 `return`，于是：
+
+- `ui.ball` 恒为 `null`；
+- `renderBall()` 第一行 `if (!ui.ball) return;` 使每次渲染都是空操作；
+- 屏幕上留下的是**上一个已死实例**算出来的数字，而那个实例的数据早已不再更新。
+
+实测取证（日志 `[tfb13]` / `[tfb12]`）：
+
+```
+[tfb13] APPLY#1 at ...
+[tfb13] inst1 t5  ballState=7/12  snapshotList=12  ballLabel=11/18  renderCalls=0  lastSig=null
+[tfb12] HOSTS=1  [h0] label='11/18' cls='tfb-ball tfb-active tfb-capsule'
+```
+
+`renderCalls=0` 是最硬的证据：新实例一次都没画过，屏幕上的数字必然属于别人。
+这与 `dsh-font-enhancer` 的 `#dsh-fe-root` 是同一类 bug（同源：`buildUI` 开头用
+「id 已存在就跳过」来防重复建 UI，但没分清那个元素是不是自己的）。
+
+**修复**：把「跳过」改成**归属判定** —— 只有当现存 host 的 shadow root 恰好是
+本实例持有的 `ui.shadow` 时才短路；否则视为上一代残留，`remove()` 后重建、
+并同步清空 `ui` 与 `lastBallSig`（否则重建后第一帧会被 `sig` 缓存判为「没变化」而跳过）。
+
+**验证**（真机探针，日志 `[tfb14]`，修复后）：
+
+```
+[tfb14] t5 hosts=1 ballState=5/10 snapshot=10 ballLabel=5/10
+[tfb14] t5 OFFICIAL='任务5 已完成 · 1 进行中 · 4 待处理'
+[tfb14] t5 dividers=1 divTxt='当前进度 · 5/10 完成'
+```
+
+`ballLabel` 与 `ballState` 终于一致；球数字 = 官方 10 条（5 完成 + 1 进行中 + 4 待处理）。
+
+### ✨ 新增：展开清单里「历史」与「当前进度」之间的分界线
+
+按「球上的数字只反映当前这一轮；展开的清单里既要有历史贡献、也要有官方最新清单，
+两段之间要有明显且美观的分界」的要求，`historySectionHtml()` 现在按此顺序渲染：
+
+```
+▾ 已完成历史 N 条      （可折叠，带 🧹）
+▸ 被抛弃的历史任务 N 条 （可折叠，带 🧹）
+───────── 当前进度 · 5/10 完成 ─────────   ← 新增分界线
+· 当前轮任务 1
+· 当前轮任务 2
+🧹 一键清理全部历史
+♻️ 一键恢复全部隐藏的历史
+```
+
+分界线由三段组成（`.tfb-divider` / `.tfb-divider-line` / `.tfb-divider-txt`）：
+两侧是两端渐隐的 1px 细线，中间是圆角小胶囊标签，两套皮肤各自配色；
+`pointer-events:none` 保证它不会挡住列表项点击。
+
+### 修复：`primary` 未持久化 + 同签名帧不修正边界
+
+两个配套缺陷，都会让「权威通道已生效」这件事在刷新后被忘掉：
+
+1. `persistSoon()` 存 `{todos, sig, at, snapLen}` 时漏了 `primary`，
+   `restorePersisted()` 恢复时也不设它 → 页面一刷新 `primary` 恒 `undefined`
+   → `hasPrimaryData()`（要求 `!!rec.primary`）恒 `false`
+   → **DOM fallback 的闸门永久敞开**，面板文本又会跨界污染快照。
+2. `setSessionTodos()` 的签名去重分支 `if (b && b.sig === sig) { b.stale = false; return false; }`
+   直接 early return，**不更新 `snapLen`** —— 被旧帧膨胀过的边界就此冻结，
+   即使之后每帧都是正确的权威数据也修不回来。
+
+现在：持久化与恢复都带 `primary`；同签名帧只要发现 `snapLen` 或 `primary` 不对，
+就地修正并重绘。
+
+### 文档：修正与实际功能不一致的描述
+
+- 皮肤数 `120` → **`128`**（实跑皮肤目录 IIFE：`ALL.length = 128`，另加「经典（旧版）」分组 6 款）
+- 纪律注入 `约 340 字 / 5 条` → **实测 498 字符 / 6 条规则**（`order=190` 不变）
+- 健康路由示例 `127.0.0.1:43120` → 改为「填你自己的端口」，并说明桌面端默认 `port: 0`
+  每次重启换端口、该路由只接受渲染进程请求（`curl` 会得到 `403 Browser access is disabled`）
+- 「watchdog 10 分钟后停止」补全主语：停的是**球的复活看门狗**（300 × 2s），
+  皮肤/可见性轮询刻意常驻
+
+## 0.14.5 — 2026-10-18
+
+### 修复：首工具判定 gate 的三处缺陷（合并社区 PR #1，作者 @WanchengWildMan）
+
+本次为**宿主侧纯 bug 修复**，客户端 `lib/client.js` 与上一版逐字节一致（悬浮球与数据同步逻辑未变）。
+
+- **缺陷① 计数卡死导致整个 turn 死锁（最严重）**
+  旧判据 `toolCallsThisTurn === 1` 命中即 `deny`，而被基准拒绝的调用**不会**回写事件流，计数永久停在 1 → 本 turn 之后**每一个**工具调用都被拒。社区实测被拒 74 次，只能新开一轮才能恢复。
+  修复：改用 `dispatchedThisTurn > 1`（只统计**已实际发出**的调用），并在检测到 `todo_write` 后立即置 `hasTodoWriteThisTurn`，补写 todo 后立刻放行。
+
+- **缺陷② `run_code` 包装调用无法识别**
+  旧代码只认 `exec.name === "todo_write"`。当 `todo_write` 被 `run_code` 包裹执行时，`exec.name` 是 `run_code`，判定必然失败。
+  修复：新增 `callArgs.indexOf("todo_write") !== -1` 兜底，脚本内调用 `todo_write` 也能识别。
+
+- **缺陷③ 并行批次时序不保证**
+  旧判据依赖"本 turn 已有几个 `tool/call`"的顺序，并行批次的事件到达顺序不受保证。
+  修复：判定改为"已发出 > 1 且见过工具名 且 未见 todo_write"，不再依赖到达顺序。
+
+- **新增 fail-open 保护**：本 turn 有调用但一个 `name` 都读不到（宿主事件结构变更）时**放行**，宁可漏拦也不阻塞会话。
+
+### 实测验证（2026-10-18）
+
+`~/.dsh/logs/desktop-next.log` 中本次运行仅出现 **1 次** deny，补写 `todo_write` 后全部后续调用正常执行；旧版为"永久卡死"。
+
+### Fix: three defects in the first-tool gate (merges community PR #1 by @WanchengWildMan)
+
+Host-half bug fix only — `lib/client.js` is byte-identical to the previous version.
+
+- **Defect 1 — counter deadlock (most severe)**: `toolCallsThisTurn === 1` denied a call that never got appended back, freezing the counter at 1 and rejecting every following call in the turn (74 rejections in the reported case). Now `dispatchedThisTurn > 1` counts only calls already dispatched, and `hasTodoWriteThisTurn` unblocks as soon as a `todo_write` appears.
+- **Defect 2 — `run_code` wrapper not recognised**: only `exec.name === "todo_write"` was matched, so a wrapped call never qualified. Now `callArgs.indexOf("todo_write") !== -1` is checked as a fallback.
+- **Defect 3 — parallel batch ordering**: the old rule depended on arrival order of `tool/call` events, which parallel batches do not guarantee. The new rule is order-independent.
+- **Fail-open guard added**: when a turn has calls but no readable `name` (host event shape changed), the gate allows the call instead of blocking the session.
+
+## 0.14.4 — 2026-10-14
+
+### 合规性改进（无功能改动）
+
+本次为**纯元数据与文档改动，未触碰任何运行代码**（`lib/*.js` 与上一版逐字节一致）：
+
+- **包元数据**：`engines.node` 对齐 DSH 运行时（`^22.19.0 || >=24.0.0`）；补 `packageManager`；`files` 白名单补上裸目录 `lib`、`locale/*.json`、`icon.svg` 与多语言 README；`exports` 补 `./locale/*.json` 与 `./icon`。
+- **交付元数据**（官方插件契约要求）：新增 `locale/en.json` 与 `locale/zh.json`（含 `meta.title` / `meta.description`），新增 `icon.svg`（插件管理器显示用图标，不再显示裸 id）。
+- **多语言文档**：新增 `README-zh.md` 中文说明；`README-es/pt/hi.md` 标题与主 README 对齐。
+
+以上改动使插件通过官方 `dsh-plugin-dev check` 全部检查项（`P=12 F=0 W=0`）。
+
+### Compliance improvements (no functional changes)
+
+This release is **metadata and documentation only — no runtime code was touched** (`lib/*.js` is byte-identical to the previous version):
+
+- **Package metadata**: `engines.node` aligned with the DSH runtime (`^22.19.0 || >=24.0.0`); `packageManager` added; `files` allowlist now includes the bare `lib` directory, `locale/*.json`, `icon.svg` and the multi-language READMEs; `exports` gained `./locale/*.json` and `./icon`.
+- **Display metadata** (required by the official plugin contract): added `locale/en.json` and `locale/zh.json` with `meta.title` / `meta.description`, plus `icon.svg` so the plugin manager shows a real name and icon instead of a bare id.
+- **Multi-language docs**: added `README-zh.md`; `README-es/pt/hi.md` headings aligned with the main README.
+
+With these changes the packages pass every official `dsh-plugin-dev check` item (`P=12 F=0 W=0`).
+
+---
+
+## 0.14.3 - 官方 DSH 兼容声明与引擎版本口径修正
+
+依照 DeepSeek Harness **官方规范**（`packages/boot/app-boot/README.md`）修正兼容性声明。
+
+- **新增官方 DSH 兼容声明**：内核检查的是 `peerDependencies` 中的
+  `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 范围，**不读取 `engines.dsh`**。
+  现已在 `peerDependencies` 与 `devDependencies` 同范围声明：
+  `@deepseek-ai/cordis` `^4.0.2`、`@deepseek-ai/dsh` `>=0.1.7-rc.1`。
+- **引擎口径修正为内核版本**：此前 `engines` 只写 `node`，未声明 DSH 内核要求；
+  现补 `engines.dsh = >=0.1.7-rc.1`（内核版本口径，非客户端/外壳版本）。
+- 说明：`^0.1.7` **不匹配**预发布内核 `0.1.7-rc.2`，故范围使用显式预发布下限。
+
+无功能变更。
+
+
+All notable changes to this project are documented in this file.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## v0.14.2（2026-09-29）— README 功能简介重写（安装前就能看懂它是干什么的）
+
+- ✍️ **两份 README 顶部新增三段「说清楚」的内容**（中英对称）：
+  - **一句话说明** —— 用一张「你遇到的痛点 → 这个插件怎么解决」对照表，
+    把 7 个真实场景讲透：计划条随对话滚走、要知道几项做完、不知道当前在忙
+    哪一项、多会话来回切、完成状态分不清、想回看旧任务、球挡住视线。
+  - **为什么值得装** —— 6 条价值点：专治长任务失联、多会话并行可见、
+    与姊妹球共用 120 皮肤保持统一、双端同码、零侵入零配置（Shadow DOM
+    隔离）、双通道数据可靠（官方面板折叠时仍有完整清单）。
+  - **基本用法** —— 单击/再点/Esc/右键/拖拽/颜色含义，一眼可操作。
+- 🔧 **修正原有结构问题**：截图章节与其后标题之间缺空行（渲染时会粘连）；
+  英文版原有的 "What is this?" 与新简介内容重复，已改写为聚焦操作的
+  "Basic usage"，不再重复痛点描述。
+- ➕ **顶部加 3 个徽章**（npm / license / DSH 版本要求），安装前可快速判断
+  兼容性与来源。
+- 📦 同步发布到 npm，确保 npm 页面的 README 与 GitHub 完全一致
+  （v0.14.0 发布时 README 尚未更新，故递增补发）。
+## v0.14.0（2026-09-29）— 效果宣传图 + README 展示 + npm 包纳入图片
+
+- ✨ **新增 4 张效果宣传图**（`docs/images/`），并在中英双语 README 顶部
+  新增「效果展示 / Screenshots」章节逐一说明：
+  - `preview-pinned-sessions.jpg` / `preview-pinned-sessions-2.jpg`
+    —— **固定标签 · 双对话任务进度**：固定两个会话后，面板并排显示两栏
+    任务进度，并行任务无需切换会话即可同时盯住。
+  - `preview-capsule.jpg` —— **胶囊模式**：右键收起为细长胶囊，只显示当前
+    进行中任务与 `已完成/总数`。
+  - `preview-skins.png` —— **皮肤清单（120 种）**：与姊妹插件
+    skill-browser / font-enhancer 共用同一套皮肤目录，三球外观统一。
+- 🔧 **修正 `package.json` 的 `files` 白名单**：原先只声明 `docs/*.md`，
+  **不含 `docs/images/*`**，导致 npm 包里不会带上任何截图（GitHub 能看到、
+  npm 用户看不到）。现已加入 `docs/images/*`，确保两个渠道内容一致。
+- 🧹 **清理 2 个从未被引用的孤儿截图**（`todo-float-ball-collapsed.png`、
+  `todo-float-ball-expanded.png`，合计约 308 KB）—— 它们既未被任何 README
+  引用，也不在白名单内，属于仓库冗余。
+- 🖼 **图片体积优化**：原图合计 498.6 KB → **287.6 KB（降 42%）**。
+  思路是按内容选格式：照片型截图用高质量 JPEG（`-q:v 3`，实测平均每通道
+  偏差 1.4~2.0/255，视觉无损）；皮肤清单因是大量小色块罗列（JPEG 最不擅长
+  的场景，偏差达 2.98/255），**保留为无损 PNG**。
+## v0.13.7（2026-09-28）— 统一皮肤补上「呼吸」动效（此前只有经典皮肤有）
+
+- 🔴 **现象**：换成 128 套统一皮肤后，球体不再有呼吸感，看起来是静止的。
+- 🔴 **根因（一直如此，非回归）**：呼吸动效 `tfbBreathe` 只写在
+  `legacyCssText()` 里 —— 也就是**只服务于 3 套经典皮肤**
+  （nebula / nebB / nebC）。而统一皮肤走 `skinCssText()`，那条路径**从未
+  输出过** `tfbBreathe`，它只继承各皮肤 `rim` / `band` / `extra` 字段声明的
+  动效（实测主要是边框的 `dshSkinSpin` 旋转）。
+  实测确认：`animation:tfbBreathe` 全文 3 次出现，**全部位于
+  `legacyCssText` 内**；`SK.fx()` 也只为拼接 `rim`/`band`/`extra` 而存在，
+  自身不产生任何动画。因此从经典皮肤切到任意统一皮肤 = 呼吸动效消失。
+- ✅ **修复｜为统一皮肤注入呼吸动效**：在 `skinCssText()` 中补齐
+  `@keyframes tfbBreathe`（3.2s，与经典皮肤同节奏）与
+  `@keyframes tfbBreatheSoft`（4.2s，idle 态更柔和），由各皮肤既有的
+  CSS 变量驱动配色。同时保证：
+  - **完成态（tfb-done）关闭动画** —— 任务全部完成时不该继续"呼吸"。
+  - **尊重 `prefers-reduced-motion`** —— 系统要求减弱动效时自动关闭。
+  - **皮肤的个性化动效仍优先**：`s.extra` / `s.rim` 在呼吸规则之后注入，
+    按源码顺序覆盖。
+- ⚠️ **过程中发现并规避的一个真实冲突（重要）**：最初实现让呼吸动画驱动
+  `transform`，而球体的悬停/按下反馈正是
+  `.tfb-ball:hover{transform:scale(1.08)}` 与 `:active{transform:scale(.95)}`。
+  运行中的动画对**同属性**的优先级高于非 `!important` 声明，因此那版实现会
+  **静默吃掉鼠标悬停与按下的缩放反馈**。已改为呼吸只动
+  `filter`（brightness/saturate），**完全不碰 transform**，悬停/按下反馈
+  完整保留。（经典皮肤当年同样存在这个隐患，本版一并规避。）
+- 🧪 **验证（真行为测试）**：12/12 通过 —— **真实执行 `skinCssText()` 并检查
+  其产出的 CSS**（非字符串比对）：呼吸关键帧存在、球体正确引用、idle 态柔和版
+  存在、**呼吸不使用 transform**（逐帧确认只含 filter）、完成态关闭、
+  reduced-motion 生效、既有的 `dshSkinSpin` / `tfb-pulse` 未被破坏、
+  经典皮肤定义未受影响。
+  其余五轮 55 项继续全绿 —— **累计 67/67**。
+  `node --check` 通过；三处副本 SHA256 一致。
+  回滚锚点：`~/.dsh/backups/todo-client.js.*.bak-breathe-*`
+## v0.13.6（2026-09-28）— 皮肤切换真正修好：改用直存引用，不再靠 DOM 遍历
+
+- 🔴 **背景**：v0.13.5 尝试用 `ui.root.getRootNode()` 定位样式表。方向对，但仍
+  **依赖 DOM 遍历语义**（getRootNode 的返回值随层级/挂载方式而变），不是可靠
+  保证。用户实测反馈："三球皮肤不统一，别的插件都变，只有 todo 不变。"
+- 🔴 **为什么偏偏 todo 不变（架构差异，实测确认）**：
+  - `dsh-skill-browser` / `dsh-font-enhancer`：样式表放在 **`document.head`**，
+    用 `getElementById(SKIN_STYLE_ID)` **精确取回** —— 从不遍历查找，所以一直正常。
+  - `dsh-todo-float-ball-plus`：使用 **Shadow DOM**（`host.attachShadow`），样式表挂在
+    **shadowRoot 直属**，与 `ui.root`（`.tfb-root`）是**兄弟节点**。
+    而更新皮肤的代码是 `ui.root.querySelector("style")` —— `querySelector`
+    **只搜子树**，因此**永远返回 null**，赋值分支从未执行。
+  - 结论：三球共用同一套皮肤目录、同一套 `dsh-ball-skin-change` 事件，但只有
+    todo 走了一条失效的定位路径，所以表现为"别的球变、todo 不变"。
+- ✅ **修复｜保存直接引用，彻底取消查找**：`buildUI()` 在创建样式表时就把它和
+  shadow root 存进 `ui`：
+  ```js
+  ui.styleEl = style;    // 样式表本体
+  ui.shadow  = shadow;   // 其所属 shadow root
+  ```
+  `refreshStyleSheet()` 按可靠性依次取用：
+  1. `ui.styleEl`（直存，零遍历 —— 主路径）
+  2. `ui.shadow.querySelector("style")`
+  3. `ui.root.getRootNode().querySelector("style")`
+  4. `ui.root.querySelector("style")`（旧写法，仅兜底）
+  同时把 `ui` 的两处重置点（初始声明 + `refreshPlugin()`）都补上 `styleEl`／
+  `shadow`，避免重建后引用丢失。
+- 🧪 **验证（真行为测试，执行真实代码而非比对字符串）**：8/8 通过 ——
+  标准 shadow 结构切皮肤生效、连续切换生效、`styleEl` 缺失时 `getRootNode`
+  回退可用、`ui` 为空不抛异常、样式表若在 root 内部时子树兜底仍可用；
+  并含**对照组**：在同样的 shadow 结构上，旧写法 `root.querySelector("style")`
+  返回 `null` 且样式未被改动，直接证明根因。
+  其余四轮 47 项（动效 force 10 + 闪烁 15 + 布局 15 + rc.2 主会话 7）继续全绿，
+  **累计 55/55**。`node --check` 通过；三处副本 SHA256 一致。
+  回滚锚点：`~/.dsh/backups/todo-client.js.*.bak-skin2-*`
+## v0.13.5（2026-09-28）— 修复「更换皮肤不生效」（潜伏已久的选择器错误）
+
+- 🔴 **症状**：在设置里点皮肤不换样子；展开/收起面板后也不刷新皮肤。
+- 🔴 **真根因（自 v0.9 起潜伏，与内核升级无关）**：`buildUI()` 构建 shadow
+  树时，样式表是挂在 **shadowRoot 直属**的：
+  ```
+  shadow.appendChild(style);     // <style> 在这里
+  shadow.appendChild(root);      // root === ui.root (".tfb-root")
+  ```
+  即 `<style>` 是 `ui.root` 的**兄弟节点**。而更新皮肤的代码写的是
+  ```js
+  var st = ui.root.querySelector("style");
+  if (st) st.textContent = cssText();
+  ```
+  `querySelector` **只在子树内查找**（不含自身与兄弟），因此这里**每次都
+  返回 null**，赋值分支从未执行过。
+- 🔴 **为什么以前"看起来能用"**：`hide()` 收起面板时会
+  `setTimeout(refreshPlugin, 120)`，而 `refreshPlugin()` 会
+  **拆掉并重建整个 DOM**，新建的 `<style>` 在创建时就带上了当前的
+  `cssText()`。于是换皮肤真正生效的路径一直是**"收起面板->重建"**，
+  而不是那个失效的赋值 —— 一个潜伏的 no-op 被 DOM 重建掩盖了。
+- 🔴 **为什么现在暴露**：v0.13.3 为修「两侧布局在折叠后丢失」，
+  移除了 `hide()` 里的无条件 `refreshPlugin()`（否则重建的面板会丢掉
+  `tfb-hz`）。掩体一撤，失效的赋值就露出来了 —— 换皮肤随之彻底不工作。
+- ✅ **修复｜新增 `refreshStyleSheet()` 作为样式表唯一写入点**：
+  用 `ui.root.getRootNode()` 上升到所属 shadowRoot 再找 `<style>`，
+  对任意层级都成立；子树内查找保留为兜底。`applyThemeNow()` 与
+  面板内主题菜单（原先各自内联同一段错误代码）**统一改为调用它**。
+- 🧪 **验证**：新增 6 项行为回归 —— 其中**对照组直接证明根因**：
+  在同样的 shadow 结构上，旧写法 `root.querySelector("style")` 返回
+  `null` 且样式未被更新；新写法成功更新且连续切换均生效。
+  前四轮 47 项（rc.2 主会话 7 + 闪烁 15 + 布局 15 + 动效 force 10）
+  **继续全绿**，五个修复同时成立 —— 累计 **53/53**。
+  `node --check` 通过；无 BOM；括号配平；三处副本 SHA256 一致。
+  回滚锚点：`~/.dsh/backups/todo-client.js.*.bak-skinfix-*`
+## v0.13.4（2026-09-28）— 修复「动画特效停止、切换皮肤失效」（v0.13.2 守卫拦得过宽）
+
+- 🔴 **症状**：悬浮球的呼吸/旋转/发光等动效不再动了；在设置里切换皮肤也
+  像是没生效（球不换样子、动画不重启）。
+- 🔴 **根因（由 v0.13.2 的防闪守卫引入）**：v0.13.2 为消除闪烁，在
+  `renderBall()` 开头加了「签名未变则直接 return」的守卫。但
+  `renderBall()` 里的
+  `ui.ball.className = "tfb-ball " + st.cls + ...`
+  **不只是写文本**：重写 `className` 会让引擎重新计算该元素的样式，
+  从而**重新武装 CSS 动画**，也是状态类（`tfb-active` / `tfb-done` /
+  `tfb-pending`）唯一的落点 —— 而所有动效（`tfbBreathe` 呼吸、
+  `tfbRimSpin` 边框旋转、`tfbGlow` 文字辉光、`tfb-pulse`、
+  `dshSkinSpin` 等 27 条 `animation:` 规则）全都挂在由它驱动的
+  `.tfb-ball` / `.tfb-orb-rim` / `.tfb-label` 上。
+  皮肤切换走 `applyThemeNow()`：替换 `<style>` 后调 `render()` —— 此时
+  可见数字往往没变，守卫直接 return，**新皮肤 CSS 注入成功但球从未被重新
+  装饰**，于是动画停在半途、换皮肤看起来毫无反应。
+- ✅ **修复｜给守卫加 `force` 旁路**：`renderBall(force)` / `render(force)`
+  在 `force` 为真时**跳过签名比对**，强制重写 `className` 与文本。
+  - **强制（re-decoration，必须写 DOM）**：`applyThemeNow()`（皮肤/主题
+    应用 → `render(true)`）、`buildUI()` 末尾的首次渲染（元素全新，
+    绝不能因上一个 DOM 的缓存签名而跳过）。
+  - **保持去抖（数据驱动，防闪）**：`syncFromSessions()` 的
+    `if (changed) render()`、2s 看门狗轮询 —— 都走普通 `render()`，
+    v0.13.2 的闪烁修复**完全保留**。
+- 🧪 **验证**：本轮新增 10 项回归（结构 6 项 + 行为 4 项：状态未变不重写 /
+  皮肤切换强制生效 / DOM 重建后首次必然装饰 / 状态变化正常更新）全绿。
+  前三轮 37 项（rc.2 主会话 7 项 + 闪烁 15 项 + 布局 15 项）**继续全绿**，
+  四个修复同时成立 —— 累计 **47/47**。
+  另做**逐项功能核对**（对原始 v0.13.0）：15 个功能面 / 68 个标记
+  （动画关键帧与挂载点、皮肤系统与切换通道、胶囊跑马灯、进度环、
+  面板折叠、固定会话、隐藏条目、持久化、数据双通道、内联重命名、拖动、
+  健康路由、布局切换）**丢失项 0**。
+  `node --check` 通过；无 BOM；括号配平；三处副本 SHA256 一致。
+  回滚锚点：`~/.dsh/backups/todo-client.js.*.bak-animfix-*`
+## v0.13.3（2026-09-28）— 修复「两侧显示」布局在折叠/展开后丢失
+
+- 🔴 **症状**：在设置里开启「两侧显示」（左右分栏）后，**收起面板再展开，
+  分栏就没了**，退回上下堆叠；必须重新点一次按钮才能恢复。而设置里明明
+  还显示是开启状态 —— 显示与设置不一致。
+- 🔴 **根因**：布局类 `tfb-hz` 只在**一个地方**被应用过 —— `apply()` 引导期
+  （`if (ui.panel && layoutHz) ...`）。但收起面板时 `hide()` 会在 120ms 后
+  调 `refreshPlugin()`，它把整个 UI 拆掉并 `buildUI()` **重建面板 DOM**；
+  新元素自然没有 `tfb-hz`，而没有任何代码把它加回来。于是
+  `localStorage` 仍是 `1`（设置没丢）、面板却已无该 class（显示丢了）。
+- ✅ **修复 1｜面板构建即恢复布局**：`buildUI()` 在取到 `ui.panel` 后立即按
+  持久化状态恢复 `tfb-hz` —— 与紧邻下方的**位置恢复（POS_KEY）**
+  同一范式。这样**任何**面板实例（折叠重建、皮肤重载、异常重建）都会
+  自动带上正确布局，持久化值成为唯一权威。
+- ✅ **修复 2｜收起不再无谓重建 DOM**：`hide()` 原先无条件
+  `refreshPlugin()`，既丢布局，也顺手扔掉了面板的活动状态（展开的折叠区、
+  行内重命名编辑器、滚动位置）—— 用户只是收起了个浮层，没有任何结构性变化。
+  改为**就地重刷主题**（`applyThemeNow()` 自身会替换 `<style>` 并 `render()`，
+  不依赖重建 DOM），另补一次 `tfb-hz` 兜底。`refreshPlugin()` 仍保留给
+  真正的结构性重载（设置区的皮肤/结构切换），且因为修复 1，那条路径也安全了。
+- 🧪 **验证**：15 项运行时回归全绿 —— 覆盖折叠后保持、**再展开保持（本次
+  目标）**、反复折叠展开、`refreshPlugin` 重建后保持、只有按钮能关闭、
+  关闭态不会被自动开启、重载后按已存设置恢复（开/关两种态）。前两轮修复
+  的 22 项回归（rc.2 主会话判定 7 项 + 闪烁修复 15 项）**继续全绿，无回归**；
+  `node --check` 通过；无 BOM；括号配平；三处副本 SHA256 一致。
+  回滚锚点：`~/.dsh/backups/todo-client.js.*.bak-layoutfix-*`
+## v0.13.2（2026-09-28）— 修复任务执行中进度数字不停闪烁（0/1 ↔ 7/9）
+
+- 🔴 **症状**：长任务执行过程中，球面进度在两套数字之间**来回跳**
+  （例如 `0/1` ↔ `7/9`），同一批任务总量忽大忽小，看似"任务在重算"。
+- 🔴 **根因一｜快照边界跟着本帧条数走**：`todo_write` 是**整表覆盖**，
+  但模型有时只重写刚动过的那一条。旧代码把 `snapLen` 赋成
+  `norm.length`（**本帧**条数），于是某一个"只写 1 条"的碎帧会把
+  "当前快照区"压塌成 1 行 → 球面立刻显示 `0/1`；下一帧模型又给回完整表
+  → 变回 `7/9`。任务从未变化，读数却在跳。
+  **修复**：快照边界是**高水位线**而非每帧值 —— `snapLen` 现在**单调不减**
+  （`max(上次, 本帧)`，并以合并后总长封顶），碎帧再也无法把实时计划缩回一行。
+- 🔴 **根因二｜两个数据通道互相打架**：sessions 服务（权威投影：整表 +
+  历史合并 + 粘性边界）与官方 DOM 面板（React 当下画了什么：可能是折叠条、
+  渲染中间态、或子代理的行）是**同一份数据的两种视图**。旧代码让面板
+  **无条件**写入，于是两者每隔一个观察周期就互相覆盖一次，
+  读数在 `7/9`（服务）与 `0/1`（面板）之间翻转。
+  **修复**：DOM 面板降级为**纯回退通道** —— 仅当权威通道尚未为该会话
+  产出数据时才接管（`hasPrimaryData()` 守卫）。新增 `primary` 标记：
+  只有权威通道会置位，面板既不置位也不清除它（服务一旦发过声，
+  它对该会话就保持权威）。
+- 🟡 **根因三｜球面每轮无条件重绘**：`renderBall()` 在每次 `render()` 与
+  每 2s 看门狗里都直接写 `textContent`/`className`/CSS 变量，即使值完全
+  相同也会触发合成层重绘，视觉上就是一记闪烁。
+  **修复**：记录上次绘制的签名 `lastBallSig`，**内容未变则完全跳过 DOM**。
+  `refreshPlugin()`（重建 DOM）会一并清空该缓存，避免"元素已换新却被判为
+  无变化"而漏绘。
+- 🧪 **验证**：新增 15 项运行时回归（碎帧不压塌计数 / 碎帧不回退 /
+  双通道守卫拦截 / 兜底仍可独立工作 / 兜底不清除 primary /
+  兜底不抬升 snapLen / null·空·非法输入·非法状态均不抛）**全绿**；
+  上一轮 rc.2 的 7 项回归继续全绿；`node --check` 通过；无 BOM；
+  loader id 仍为 `dsh-todo-float-ball-plus`；括号配平；三处副本 SHA256 一致。
+  回滚锚点：`~/.dsh/backups/todo-client.js.*.bak-flickerfix-*`
+## v0.13.1（2026-09-28）— 修复 DSH 0.1.7-rc.2 内核升级后悬浮球不显示内容
+
+- 🔴 **根因（内核契约变更，非插件自身 bug）**：`0.1.7-rc.2` 把 `sessions.list`
+  快照里的 `current` 字段**彻底移除**，该快照现在只有
+  `{ ids, byId, phase, projectionsBySession }` 四个字段（见
+  `dsh-api-session-controller/lib/types/client/sessions/service.js`）。
+  "哪个会话是主会话"改由**逐行 retain 计数**判定：
+  `sessions.retainInfo(id).getSnapshot().retainedBy.mainView > 0`
+  （官方参考实现：`dsh-client-ui-session` 的 `publishMain()`）。
+- 🔴 **症状**：`syncFromSessions()` 读 `snap.current` 恒为 `undefined`
+  → `currentSid` 永远停在 `null` → 所有 todo 记录被写进字面量桶
+  `"current"`，而渲染时按**真实 sessionId** 取值 → 取不到 →
+  **悬浮球有数据但渲染为空**。官方 todo 面板走
+  `useProjection("todos")`，不经过这条链路，所以**原生进度条一直正常**
+  —— 这正是"内核自带的正常、悬浮球空白"的原因。
+- ✅ **修复 1｜主会话判定兼容双内核**：新增 `resolveMainSessionId()`，
+  优先沿用旧内核的 `snapshot.current`，在新内核上按官方规则
+  `retainedBy.mainView` 判定；再回退到"唯一携带 todos 的行"
+  （避免 rc.2 的 subagent 行干扰）。另加 `matchLegacyCurrent()`
+  作为 `retainInfo` 途径的防御性兜底。
+- ✅ **修复 2｜历史数据重定向**：`currentSid` 首次确定时，把误存于
+  `"current"` 桶的记录迁移到真实 sessionId，否则修复后的**首帧仍为空**。
+- ✅ **修复 3｜DOM 兜底通道常开**：原先 `if (!hasSessionsSvc)
+  installPanelObserver()` 意味着"只要 sessions 服务在就永不装兜底"，
+  于是主通道静默失效时**完全无感知**（本次事故即如此）。现改为**始终安装**
+  —— `readOfficialPanel()` 本身已有"绝不覆盖真实记录、仅在当前会话无数据时
+  建骨架"的保护，常开零成本，让此类内核漂移**自愈而非隐形**。看门狗轮询
+  也补了一条 `!currentSid` 时读官方面板的保险。
+- 🧪 **验证**：7/7 运行时回归通过（rc.2 判定 / 旧内核兼容 / 不抖动 /
+  无 retainedBy 回退 / 空快照 / byId 缺失均不抛异常）；`node --check`
+  语法通过；无 BOM；`__ModuleLoader__.load` 的 id 仍为
+  `dsh-todo-float-ball-plus`（与 package.json、cordis.patch.yml 三处一致）；
+  括号配平；三处副本 SHA256 完全一致。
+  回滚锚点：`~/.dsh/backups/todo-float-ball-client.js.*.bak-rc2fix-*`
+## v0.13.0（2026-09-17）— 硬约束：每轮首个工具调用必须是 todo_write
+
+- 🔴 **新增硬门（`lib/index.js` host half）**：`ctx.on("tools/pre-execute")` 拦截 —— **每个回复 turn 的第一个工具调用若不等于 `todo_write`，直接返回 `{kind:"deny", reason:"…"}`**，模型读到拒绝原因后会立即补写 todo 清单。
+  - **为什么**：注入的纪律文本（v0.9.0 起）只是"建议"，实测在长任务/自动续轮时会漏写（作者本人 2026-09-17 连续多轮只顾查进度忘了刷新 todo，悬浮球停留在旧清单）→ **文本管不住，改由工具调度层强制执行**。
+  - **判定原理**：`dsh-agent-loop` 先 append 持久事件 `tool/call`，再进入 `dsh-tools` 的 dispatch（`tools/pre-execute`）；因此门内看到「当前 turn 内 `tool/call` 恰好 1 个」= 本次即该 turn 首个工具调用。
+  - **安全设计**：整段 try/catch，取不到 `exec.agent.session.snapshotEvents()` 等任何异常形态一律 `next()` 放行 —— 判定失效只会"门不生效"，**不会拦正常工作**。
+  - **开关**：插件 config `enforceFirstTodoWrite: false` 可关闭（默认开启）。
+- 🔴 **修复：package.json 中文编码损坏**。上一版（0.12.1）用 PowerShell `Get-Content -Raw`（按 GBK 解码）+ `WriteAllText`（UTF-8 写）改版本号 → 中文 description 全变乱码且引号被截断 → **JSON 非法、`node --check` 报 `ERR_INVALID_PACKAGE_CONFIG`**。已从 `package.json.bak-20260914` 恢复并用 **Python `json`（UTF-8 显式）** 重写（现 1506 B，合法）。损坏副本留存 `package.json.broken-20260917` 供对照。
+  - **教训（通用）**：改含中文的 JSON/配置文件**一律用 Python `io.open(..., encoding="utf-8")` + `json`**，**禁止** PowerShell `Get-Content -Raw` + `WriteAllText` 组合阅读写回（编码不一致必坏）。
+- 备份：`lib/index.js.bak-20260917-todogate`。
+- 生效：host half 改动需**重启 DSH** 后加载。
+
+## v0.12.1（2026-09-17）— 胶囊展开不再只有数字
+
+- 🔴 **修复：胶囊（capsule）模式在无「进行中」任务时只显示裸数字**（用户实测反馈："展开的胶囊不显示待办的具体事项内容只有数字"，表现为 `待办 4/5`）。根因：`lib/client.js` 胶囊 sub 文本三级逻辑只认 `in_progress`（运行中任务），当清单为「全部 completed + 部分 pending」时取不到运行任务 → 回退成 `待办 N/M`。
+- 修复：新增 **pending 兜底**——胶囊文本三级优先：①有进行中 → `▶ 任务文本`；②无进行中但有 pending → `○ 首个待办文本`；③全部完成 → `✓ 全部完成 N/N`。数字仍保留在胶囊左侧 label（`4/5`），不再出现"只有数字没有内容"。
+- 备份：`lib/client.js.bak-20260917-capsule415`。验证：`node --check` 通过 + 复现脚本三例通过（`E:\DSHskills-test\_todo-plugin-fix-20260917\repro-415.js`）。
+- 生效：client-plugin HMR（需 `pnpm run dev:web` 在跑）或刷新/重启 DSH。
+
+## [Unreleased] - 2026-09-17（本地改动，未发布）
+
+- 🔴 注入纪律新增第 6 条「正文待办必入清单」（用户强制）：回复正文出现「待办／待审批／还没弄的／未完成／后续要」事项，必须同轮同步追加进 todo 清单，禁止只写正文不进清单；正文待办与 todo 清单必须一致。背景：2026-09-17 实测正文列 3 项待办未入清单（agent 执行疏漏）→ 用户要求强化到插件本体而非技能层。
+- 备份：`lib/index.js.bak-20260917-todo6`。
+
+## v0.12.0（2026-09-14）— 三球统一 128 皮肤系统
+
+- 新增共享皮肤目录 `window.__DSH_BALL_SKINS`（与 dsh-skill-browser / dsh-font-enhancer 同一份目录）：128 款皮肤 = 审定方案 01-128（20 招牌特效 + 8 克制精选 + 100 中国传统色单色相）。
+- 🎨 皮肤菜单重构：按 分组（招牌特效/克制精选/浓郁深底/尘埃灰调/柔光深底/中性点缀/浅色纸面/经典）分组展示，带色点预览，可滚动。
+- 三球同步：共享 localStorage 键 `dsh-ball-skin`，任一处切换（Todo 面板 🎨 / 技能球面板设置 / 字体球面板 / DSH 设置页「悬浮球导航」下拉）三球+面板 UI 颜色一起换。
+- 面板全面皮肤化：背景/边框/文字/状态色/进度点/皮肤菜单全部跟随当前皮肤（旧 6 皮肤保留在「经典」分组，选经典时本球回到旧版外观）。
+- 兼容：旧 `dsh-tfb-theme` 键保留；`data-tfb-theme` 委托同时接受经典与 128 皮肤 id；轮询安全网同时盯共享键。
+- 原版保留：Todo 球 6 款旧皮肤在 🎨 菜单「经典」分组；技能球（原版星云紫）与字体球（原版暖极光）各加「原版（仅本球）」选项——选中回到原始外观，切任意 128 皮肤即恢复三球统一；在 DSH 设置页全局换肤会自动清除原版标记。
+
+## [0.11.1] - 2026-09-13
+
+> Maintenance release: typography cleanup only. No behaviour, API or UI change
+> of any kind — the shipped `lib/client.js` is the same program with the
+> whitespace residue of the 0.11.0 scripted edits taken out.
+
+### Fixed
+
+- **Header comment reported the wrong version** (`lib/client.js`, top-of-file
+  banner). The banner still said `v0.9.1` after the package had moved through
+  0.10.0 and 0.11.0; it now reads `v0.11.1`. Comment text only — nothing here
+  is read at runtime.
+
+### Changed
+
+- **Blank-line residue compressed** (`lib/client.js`). The scripted edits that
+  produced 0.11.0 (Plan-A9 / A10 / A11) left 47 stray blank lines behind: 43
+  inside `renderList()` — one between every statement, and even between the
+  continuation lines of a shared comment — 2 whitespace-only lines inside the
+  `buildUI()` panel-markup concatenation, and 2 extras in a triple blank run
+  between `renderList()` and `renderPinned()`. Blank lines 104 → 57,
+  trailing whitespace 2 → 0, and no blank run longer than a single line is left.
+  The surviving blank lines are the 57 that separate top-level declarations and
+  the comment-led groups inside `buildUI()` — the file's original style.
+- **Two-statement lines split** (`lib/client.js`). Three lines each carried two
+  statements: `ui.ctitle.textContent = …` followed by the `ui.capCur` caption
+  update (Plan-A11), `ui.pinSec = …` followed by `ui.capCur = …`, and
+  `e.stopPropagation();` followed by `var li = …`. Every statement now owns
+  its line.
+- **Leftover empty CSS element removed** (`lib/client.js`, `cssText()`). The
+  column-caption edit left an `""` element in the shared CSS rule array, which
+  joined into a stray empty line in the generated stylesheet. The element line
+  is gone; the surrounding rules are byte-identical.
+- **Zero semantic change, verified mechanically.** A whitespace-insensitive
+  token comparison of `lib/client.js` before and after (code tokens, string
+  literals and comments kept separately) shows exactly two differences: the
+  header version text and the deleted `""` CSS element. `node --check` passes,
+  and both regression harnesses are unchanged — `dev-verify-refresh.cjs`
+  14/14 and `dev-verify-merge.cjs` 59/59.
+
+## [0.11.0] - 2026-09-13
+
+> Client-half release. Pinned (📌) sessions now render exactly like the current
+> view — one shared history renderer, per-session fold state, per-session
+> controls — and the panel gained a two-column layout switch with captions.
+
+### Fixed
+
+- **One shared history renderer for current and pinned lists**
+  (`lib/client.js`, `historySectionHtml(sid, list)`, Plan-A9). Pinned sessions
+  used to carry their own copy of the fold logic (Plan-A8) which had no
+  `🧹 Clear all history` row and no `♻️ Restore all hidden history` row. Both
+  list kinds are now produced by the same function, so the pinned panel and
+  the current panel are the same experience by construction, not by
+  duplication.
+- **Snapshot / history split ignores the hidden filter**
+  (`lib/client.js`, `snapshotRowsOf()` + `historySectionHtml()`). The split
+  was taken on the already filtered list, so hiding one snapshot row pulled an
+  archived row up into the flat area and shifted every fold boundary. The raw
+  (unfiltered) list is now cut at `snapLen` first and each part is filtered
+  afterwards — fold counts and boundaries are stable while you hide rows.
+- **Fold state is per session** (`lib/client.js`, `historyOpen` /
+  `historyOpenOpen` became sid-keyed maps). Expanding "已完成历史" in one
+  conversation no longer expands it in every other one; the pinned panels and
+  the current panel now share the same per-sid buckets (the Plan-A8
+  `pinnedHistOpen` / `pinnedOpenHistOpen` maps are gone).
+- **Fold / 🧹 / ♻️ controls carry the session they belong to**
+  (`lib/client.js`, `actionSid()` + `data-ownsid`). Now that one renderer serves
+  both list kinds, every action row is tagged with the sid it was rendered for
+  and the dispatcher resolves it (`data-ownsid` → legacy `data-sid` → the
+  current session as the last fallback), so a control inside a pinned panel can
+  never act on the current list. `ACT_ALIAS` maps the legacy Plan-A8 action
+  names onto the unified ones, so nothing that used to work stops working.
+- **Pinned header counts report the current plan only**
+  (`lib/client.js`, `countsOf(snapshotRowsOf(sid))`). The pinned row's
+  done/total previously folded archived history into the numbers, breaking the
+  statistics rule established in 0.10.0.
+
+### Added
+
+- **Panel layout switch (⇄)** (`lib/client.js`, Plan-A10). A new ⇄ button in
+  the panel header toggles between the stacked layout (current list above,
+  pinned sessions below) and a side-by-side layout (left column = current
+  list, right column = pinned sessions). The choice is persisted in
+  `localStorage["dsh-todo-float-ball-plus-layout"]`, restored on load, and the
+  panel repositions itself after the switch.
+- **Column captions in the side-by-side layout** (`lib/client.js`, Plan-A11).
+  Each column gets a caption line: the left one shows the current
+  conversation title (`▸ <title>`, kept in sync with the header title), the
+  right one shows `📌 固定会话`. In the stacked layout the captions are hidden,
+  so nothing changes there.
+
+### Changed
+
+- `package.json` version 0.10.0 → 0.11.0.
+- Client-half changes only; the host half (`lib/index.js`,
+  `cordis.patch.yml`, discipline injection, health routes) is unchanged.
+- `lib/client.js` is stored with LF line endings from this release (it matches
+  the byte-for-byte copy that actually runs here); no content change beyond
+  the fixes above.
+- Internal cleanup: the click dispatcher no longer carries an empty duplicate
+  `copyItem` branch that appeared while this batch was in flight (it never
+  shipped in a release; no user-visible effect).
+- The `lib/client.js` header comment still reads `v0.9.1` (cosmetic drift; the
+  authoritative version is `package.json`, and this file is published exactly
+  as deployed).
+- Regression baseline at release time: `node --check` clean, the local
+  DOM-stub probes passed 14/14 (refresh) and 59/59 (history merge / fold /
+  cleanup / restore) checks.
+
+## [0.10.0] - 2026-09-13
+
+> Local-only release. A major client-half UX overhaul around session history:
+> merged snapshots no longer wipe older todos, the ball's counters now mean
+> "the current plan", and everything older is an archived, foldable,
+> cleanable, restorable, copyable layer that never leaks into the numbers.
+
+### Fixed
+
+- **History merge — old tasks no longer disappear** (`lib/client.js`,
+  `setSessionTodos`). Snapshots were merged into history by replacing the
+  per-session bucket with the newest snapshot wholesale, so any task absent
+  from the new snapshot vanished from the panel. A snapshot is now stored as
+  the leading `snapLen` items of the bucket and previous records whose items
+  are not contained in the new snapshot are appended after it — the current
+  plan always renders first and intact, older items survive as archive rows
+  and are never resurrected into the live counts. This also root-fixes the
+  user-reported regression introduced by the 0.9.1 removal of the
+  monotonic-progress guard (a legitimate "fewer done items" snapshot used to
+  erase history; it now simply re-defines the snapshot prefix).
+- **Statistics — the ball counts only the current plan** (`lib/client.js`,
+  `snapshotList()` + all render paths). Ball-face `done/total`, the progress
+  ring, the header summary, and the "N items left" notice all previously
+  counted merged history rows, so finished archive entries inflated the
+  numbers and the ring never returned to 0/0 after a plan was replaced. All
+  four now read exclusively the latest snapshot; history is a pure archive
+  with no effect on any counter.
+- **2s safety-net poll no longer undoes user hides** (`lib/client.js`).
+  Signature dedup moved ahead of the visibility filter application, so the
+  periodic `syncFromSessions()` refresh can no longer resurrect rows the
+  user hid a second earlier.
+- Removed the panel-footer recommendation line for the third-party plugin
+  `dsh-client-auto-continue` (user request: no third-party plugin ads).
+
+### Added
+
+- **Per-row hide (✕)** (`lib/client.js`, `HIDE_KEY`). Every history row gets
+  an ✕ button (shown on hover) that hides it at the display layer only.
+  Hidden ids are stored per session in
+  `localStorage["dsh-todo-float-ball-plus-hidden-v1"]`; the data layer, the
+  signature and the merge logic see zero difference.
+- **Independent history fold rows** (`lib/client.js`, Plan-A3/A3.1). Two
+  separate collapse rows — `▾ Completed history (N)` and
+  `▸ Abandoned history tasks (M)` — each counted from its own status set and
+  collapsed by default; the latest snapshot always renders fully expanded.
+  The per-session bucket gained a `snapLen` field to mark the snapshot
+  prefix (also used by the statistics fix above).
+- **Batch cleanup (🧹)** (`lib/client.js`, Plan-A5). Each fold row carries a
+  🧹 button that hides everything in that fold, plus a
+  `🧹 Clear all history (X)` row that hides both folds at once.
+- **Row copy button (📋)** (`lib/client.js`, Plan-A6). Every row gets a 📋
+  button that copies the full task text from a `data-copy` attribute — not
+  the 80-char display truncation — via `execCommand('copy')` first with a
+  clipboard-API fallback, and gives a real ✓/⚠ feedback.
+- **One-click restore (♻️)** (`lib/client.js`, Plan-A7). A
+  `♻️ Restore all hidden history (X)` row appears only while at least one
+  row of the session is hidden and unhides everything at once (the inverse
+  of ✕/🧹).
+- **Pinned sessions: per-row hide without cross-session leaks**
+  (`lib/client.js`, Plan-A2.2). Rows inside a pinned (📌) session list can be
+  hidden independently: pinned `<ul>`s carry a `data-ownsid` attribute and
+  `sessionTodosVisible()` filters per owning session, so a hidden id stored
+  under session A can never hide a row rendered for session B.
+
+### Changed
+
+- `package.json` version 0.9.1 → 0.10.0.
+- Client-half changes only; the host half (`lib/index.js`,
+  `cordis.patch.yml`, discipline injection, health routes) is unchanged.
+- The `lib/client.js` header comment still reads `v0.9.1` (cosmetic drift;
+  the authoritative version is `package.json`).
+
+## [0.9.1] - 2026-09-12
+
+> Local-only release. Fixes the two ways the ball could sit on stale todo data,
+> and makes the plugin usable straight after install with no configuration step.
+
+### Fixed
+
+- **Refresh defect 1 — the progress-regression guard is gone**
+  (`lib/client.js`, `setSessionTodos`). `todo_write` is a whole-list
+  replacement, so a fresh snapshot may legitimately carry FEWER completed items
+  than the previously rendered one (list re-organised, a status re-adjusted, an
+  item re-opened, a round rewriting the plan). The old plan-aware monotonic
+  guard compared done-counts within an identical content set and silently
+  discarded those snapshots as "stale", which is exactly why the ball kept
+  showing outdated progress. A new snapshot now always wins; the existing
+  signature (`status|content` join) check remains the only dedupe, so an
+  unchanged payload still costs nothing.
+- **Refresh defect 2 — the 2s watcher now pulls todo data**
+  (`lib/client.js`, `watchBallVisibility`). The interval only refreshed ball
+  visibility and the theme, never the todos: if the
+  `ctx.sessions.list.subscribe()` callback stopped firing (shell re-render,
+  dropped projection frame, remount), the ball stayed on stale data until a
+  manual page reload. `syncFromSessions()` is now called from that tick as a
+  safety net. It stays cheap by construction: `setSessionTodos()` returns early
+  on an identical signature and `syncFromSessions()` only re-renders when
+  something actually moved (`setSessionTodos` now reports whether it accepted a
+  snapshot).
+
+### Added
+
+- **Install-and-go defaults** (`lib/client.js`: `DEFAULTS` + `getCfg` /
+  `peekCfg` / `ensureDefaultCfg`). Preferences live in `localStorage`, which is
+  per-origin — a fresh install, a new profile, a cleared browser profile, or a
+  changed port all start empty and used to require re-configuring by hand. Every
+  switch now carries a code default, seeded into `localStorage` once on first
+  run so the value also stays visible and editable afterwards:
+
+  | Key | Default |
+  |---|---|
+  | `dsh-tfb-ball-visible` | `1` (always visible) |
+  | `dsh-tfb-theme` | `graphite` |
+  | `dsh-todo-float-ball-plus-capsule` | `0` (round ball, not pill) |
+  | `dsh-todo-float-ball-plus-pos` | bottom-right for the current viewport |
+
+  `injectDiscipline` (host-side prompt section) already defaulted to `true` and
+  is unchanged. Seeding only ever writes an ABSENT key — an existing user's
+  stored choice is never overwritten (covered by a regression test). The seeded
+  position is clamped into the viewport, and the restore path still falls back to
+  the CSS default when a stored point no longer fits, so a stale seed cannot park
+  the ball off-screen.
+
+### Changed
+
+- `lib/client.js` header comment `v0.3.0` → `v0.9.1` (it had drifted from
+  `package.json` while the data layer was rebuilt on the official `sessions`
+  service; the historical `v0.3.0 —` note below it is kept intentionally).
+- Theme handling collapsed onto one `isTheme()` predicate and `getCfg`, replacing
+  three copies of the same skin whitelist (`loadTheme`, `setTheme`,
+  `applyThemeNow`).
+- `package.json` version 0.9.0 → 0.9.1.
+
+### Verified
+
+- `node --check lib/client.js` passes; the file stays UTF-8 **without BOM**
+  (BOM is what makes DSH report `Unexpected token 'ï¿½'`).
+- New `dev-verify-refresh.cjs` (run: `node dev-verify-refresh.cjs lib/client.js`)
+  drives the real browser bundle through its `__ModuleLoader__` factory under a
+  DOM/localStorage stub: 14/14 checks pass on 0.9.1, while the same probe on the
+  pre-0.9.1 build fails exactly on the two refresh defects and the missing seeds
+  (7/14) — so the tests demonstrably detect the bugs they fix. It also asserts
+  that stored preferences are never overwritten by the seeding.
+- `injectDiscipline` (host prompt section) is unchanged and still `true` in
+  `cordis.patch.yml`.
+
+### Notes
+
+- Client-half changes only (`lib/client.js`); the host half (`lib/index.js`,
+  the discipline prompt section and the loopback health routes) is untouched.
+- `syncFromSessions()` gained a `currentSessions` null-guard, because the 2s
+  watcher now calls it unconditionally even when the sessions service is absent.
+
+
+## [0.9.0] - 2026-09-10
+
+> Local-only release (not published to npm yet). Adds an optional, ON-by-default
+> system-prompt injection so the todo rules are resident in every session even
+> when the `todo-show-discipline` skill is never loaded.
+
+### Added
+
+- **Host half now injects a "todo discipline" system-prompt section**
+  (user request: the todo 铁律 kept failing because skills are loaded on demand —
+  a session that never loads the skill never carries the rules). `lib/index.js`
+  adds `systemPrompt` to `inject` and registers
+  `ctx.systemPrompt.section({ name: "todo-discipline", order: 190, text })`,
+  disposed through `ctx.effect(...)` exactly like `dsh-taskboard`'s protocol
+  section (`order: 180`). Order 190 keeps the two work-discipline blocks
+  adjacent inside the built-in policy band (`DEPLOYMENT_PERSONA=0` →
+  `PLAN_POLICY=500`) and leaves 181..189 free for future sections.
+  The injected text is 362 characters (187 CJK) and carries only the 5 hardest
+  rules — the long-form rules stay in the `todo-show-discipline` skill.
+  Works on both the desktop and the web profile, and across presets, because it
+  is a plugin/host capability rather than a skill.
+- **Config switch `injectDiscipline` (default `true`)**: set
+  `config: { injectDiscipline: false }` on the plugin's bundle-patch row to skip
+  the section entirely (no empty-text section is registered). Only an explicit
+  boolean `false` disables it. Ships as `config: { injectDiscipline: true }` in
+  `cordis.patch.yml`.
+- `dev-verify-inject.cjs`: offline verifier that loads the real ESM host half and
+  drives `apply()` with a fake cordis context — asserts exports, inject list,
+  section name/order/text budget, the on/off switch behaviour, and that both
+  loopback health routes still register and answer 200/403.
+
+### Changed
+
+- `package.json` version 0.8.0 → 0.9.0 (local build ahead of the published
+  0.8.0, so a plugin-manager "update" cannot silently downgrade it).
+
+### Unchanged (verified)
+
+- `lib/client.js` display logic untouched; `/dsh-todo-float-ball-plus/health` and
+  `/dsh-todo-float-ball-plus/client-alive` behaviour and the loopback-only guard
+  unchanged.
+
+## [0.8.0] - 2026-09-08
+
+> Published: 2026-09-08. Repository first created 2026-09-06 (v0.1.0 skeleton); v0.8.0 ships six skins, multi-session monitoring, inline rename, capsule mode and durable persistence.
+
+### Added
+
+- **Nebula triple-variant** (user: 都保留 — keep all three texture
+  proposals): the 🎨 picker now offers SIX skins —
+  🌌 星云·流光 (A, current), 🌟 星云·宝石 (B, gemstone depth),
+  🌙 星云·顶弧 (C, crescent top-glow), 💎 石墨版, 🔵 蓝宝石版,
+  🧊 玻璃版. B/C keep the opaque-dark base (background-independent),
+  rim flow, breathing, amber in-progress and per-status tints.
+
+### Reverted
+
+- Glass-panel experiment (user: text hard to read) — the expanded panel
+  stays on the original dark translucent style.
+
+## [0.7.7] - 2026-09-08
+
+### Changed
+
+- **Nebula skin now uses an OPAQUE dark base** (user request: 深浅背景观感
+  一致): all four status gradients were semi-transparent and looked
+  different on light vs dark backgrounds — they are now fully opaque
+  (black base + teal/amber/mint/ice nebula tints), rendering identically
+  on any background. The rim flow + breathing animations are unchanged.
+
+## [0.7.6] - 2026-09-08
+
+### Changed
+
+- **Panel is now frosted-glass translucent** (user request: 字体背景透明):
+  background 68% opacity + 28px backdrop blur with saturate boost — the
+  DSH interface shows through softly in both dark and light themes.
+- **Balls get a subtle outline** (1px translucent white): clean silhouette
+  on any background; on dark it reads as a gem edge, on light it keeps
+  the dark balls from looking like flat blobs.
+
+## [0.7.5] - 2026-09-08
+
+### Fixed (ecosystem compatibility hardening)
+
+- **悬浮球导航 shows the SAME interface no matter which balls are
+  installed** (ecosystem spec): the three visibility toggles are ALWAYS
+  displayed; a ball that is not installed shows its toggle grayed-out
+  with "（未安装）" instead of disappearing — installing a sibling later
+  makes its toggle active automatically.
+- **Uninstall safety net**: if dsh-skill-browser (the section provider)
+  is removed while the Todo ball was hidden, the ball would be stuck
+  invisible with no way back — `applyBallVisibility` now detects the
+  provider is gone and shows the ball again.
+- The shared section's 🎯 reset and rec-badge detection tolerate any
+  install combination (null-guarded DOM probes; todo ball resets through
+  its Shadow DOM).
+
+## [0.7.4] - 2026-09-08
+
+### Fixed
+
+- **Ball size parity, take two**: the progress ring now uses the same
+  1px outer overhang as the skill orb's rim (was 2px), so the visual
+  diameter matches the skill-browser ball exactly at 46px+1.
+
+### Changed (dsh-skill-browser shared section)
+
+- 🎯 button text: "所有悬浮球回到右下角" (was 双球 wording).
+- Usage notes updated: three-ball visibility control (skill / font /
+  todo, all shown by default on fresh install); Todo skin switching
+  happens inside the todo panel via 🎨 (星云 / 石墨 / 蓝宝石); reset
+  returns ALL balls to the bottom-right.
+
+## [0.7.3] - 2026-09-08
+
+### Fixed
+
+- **Ball visual size now matches the skill-browser orb**: the progress
+  ring's `inset:-4px` overhang made the ball look ~54px despite the 46px
+  body — ring now hugs the ball edge (inset:-2px).
+
+### Added
+
+- **Collapse refreshes the whole plugin UI** (font-enhancer pattern):
+  folding the panel rebuilds the UI after 120ms, so theme/structure
+  changes apply immediately on collapse — same behavior as the font
+  plugin's reload-on-collapse.
+- **Three-ball reset**: the shared settings section's 🎯 reset button now
+  also returns the TODO ball to the bottom-right default (clears its
+  position memory + DOM reposition, no restart) — skill + font + todo
+  balls all reset together.
+
+## [0.7.2] - 2026-09-08
+
+### Changed
+
+- **Ball size unified with the skill-browser orb**: 46px on all skins
+  (was 52px nebula / 56px others).
+- **Nebula skin motion fix** (user: the up/down flowing band covered the
+  text): the band layer is removed; the rim light now circles the OUTER
+  edge only (skill-orb style rimSpin, faster while in progress) — text
+  stays clear. In-progress nebula tint is amber, matching the other
+  skins.
+
+### Added
+
+- **🎯 一键归位** button in the panel footer: instantly moves the ball
+  back to the bottom-right default corner and clears the saved position
+  (no restart needed) — mirrors the skill-browser's reset button.
+
+## [0.7.1] - 2026-09-08
+
+### Changed
+
+- **Ring skin removed** (user: it looked the same as graphite): the picker
+  now offers three skins — 🌌 星云版 / 💎 石墨版 / 🔵 蓝宝石版; any
+  previously-saved "ring" value falls back to graphite.
+
+## [0.7.0] - 2026-09-08
+
+### Added
+
+- **Fourth skin: 🔵 蓝宝石版 (blue)** — deep-blue gem base with a blue
+  glow and blue progress ring, the early blue version brought back as a
+  first-class option. The 🎨 picker now lists four skins:
+  🌌 星云版 / 💫 环版(粗环) / 💎 石墨版 / 🔵 蓝宝石版.
+
+### Changed
+
+- **Ring skin visually distinct from graphite** (user: they looked the
+  same): the ring skin now shows a THICK (9px) glowing progress ring with
+  a stronger drop-shadow, clearly different from the thin graphite ring.
+  The skin renderer was refactored into per-skin rule blocks (kept the
+  same public behavior; status variants + ring/band/rim per skin).
+- **Open/close triggers a theme refresh** (mirrors the font plugin):
+  expanding AND folding the panel re-applies the current skin, so any
+  theme change is picked up on open/close instead of only on the 2s poll.
+
+## [0.6.9] - 2026-09-07
+
+### Changed
+
+- **Skin picker is now an explicit menu** (user request instead of the
+  invisible cycling): clicking 🎨 in the panel header opens a dropdown with
+  the three skins (🌌 星云版 / 💫 环版 / 💎 石墨版), the current one marked
+  with a ✓ highlight; picking one switches instantly and updates the
+  highlight. Clear, visible feedback on every click.
+
+## [0.6.8] - 2026-09-07
+
+### Changed
+
+- **Round ball shows only progress** (user requirement): the ball face is
+  just `done/total` (or ✓ when all done) — the task-content sub-line is
+  no longer rendered in round mode, since it never fit.
+- **Capsule text scrolls**: overflowing task names in capsule mode
+  ping-pong horizontally (measured marquee — the shift distance is
+  computed from the actual overflow, capped by animation, static when it
+  fits).
+
+## [0.6.7] - 2026-09-07
+
+### Changed
+
+- **Skin switching moved into the ball's own panel** (user decision after
+  the settings-slot buttons proved unreliable): the panel header now has a
+  🎨 button between 📌 (pin) and ✕ (close) that cycles
+  🌌 nebula → 💫 ring → 💎 graphite → 🌌, rebuilding the shadow stylesheet
+  in place — 100% native events inside our own Shadow DOM, nothing can
+  break it. The choice persists via the same `dsh-tfb-theme` key.
+- The settings section keeps only the Todo promotion row in the shared
+  "推荐插件" list (the unreliable in-settings skin buttons are removed).
+
+## [0.6.6] - 2026-09-07
+
+### Fixed
+
+- **Skin switcher buttons now actually clickable** (second attempt, root
+  cause confirmed): React synthetic events AND ref callbacks are both
+  unreliable inside the settings section slot. The three skin buttons are
+  now plain `data-tfb-theme` attribute buttons; the plugin delegates at
+  the DOCUMENT capture phase (`installThemeDelegation`) — immune to any
+  re-render, fires before anything can stopPropagation.
+
+### Changed
+
+- The Todo promotion + skin switcher moved INTO the shared "推荐插件"
+  list (all four sibling plugins now listed together: font / skill
+  browser / lightbox / todo ball) instead of a floating block.
+
+## [0.6.5] - 2026-09-07
+
+### Added
+
+- **Third skin: 💫 环版 (ring)** — the 0.6.0 style restored as a first-class
+  option: dark-gem base with a THICK glowing conic progress ring around the
+  ball (done/total arc, amber while active, mint with strong glow when all
+  done, ice-blue when pending-only). The switcher in the shared "悬浮球
+  导航" section now offers all three skins:
+  - 🌌 星云版 (nebula) — skill-orb clone, flowing bands + rotating rim;
+  - 💫 环版 (ring) — dark gem + thick progress ring;
+  - 💎 石墨版 (graphite) — v0.5.1 dark gem + thin progress ring.
+
+## [0.6.4] - 2026-09-07
+
+### Fixed
+
+- **CRITICAL: newly assigned plans were silently rejected** (user bug
+  report: "todo 显示均已完成，没有我安排的新增任务"):
+  - the v0.6.1 monotonic guard compared raw completed counts, so a genuine
+    NEW plan (whole-list replacement starting at 0 done) was misjudged as
+    a stale snapshot and dropped — the ball stayed stuck on the old
+    "all done" list;
+  - the guard is now **plan-aware**: it only applies within the SAME plan
+    (identical content set — progress within one plan must not regress);
+    a different content set is a new/edited plan and is always accepted;
+  - the persisted-record restore applies the same plan-aware rule (a
+    different plan on disk never overrides the live one).
+
+### Changed
+
+- Skin buttons in the shared settings section now bind native click
+  listeners via React refs (the slot's synthetic events were unreliable —
+  user-reported "切换按钮点击不了").
+
+## [0.6.3] - 2026-09-07
+
+### Fixed
+
+- **Skin switching now works reliably** (user-reported: buttons had no
+  effect):
+  - root cause 1: the visibility/theme watcher self-expired after ~20
+    minutes (tries cap), so after that the localStorage key was written
+    but never read again — the watcher is now permanent;
+  - root cause 2: polling alone meant up to 2s latency; the plugin now
+    exposes `window.__dshtfbApplyTheme()` and the shared settings buttons
+    call it synchronously on click — the skin swaps instantly.
+
+### Added
+
+- **Dual skin with a switcher in the shared settings section** (user
+  request: keep the previous skin too):
+  - 🌌 **星云版 (nebula)** — the skill-orb clone from 0.6.2 (default);
+  - 💎 **石墨版 (graphite)** — the v0.5.1 dark-gem style with the thin
+    progress ring, preserved as a first-class option;
+  - the switcher lives in the shared "悬浮球导航" section next to the Todo
+    toggle (provided by dsh-skill-browser); picking a skin writes
+    `dsh-tfb-theme` to localStorage and the ball hot-swaps within ~2s —
+    the shadow stylesheet is rebuilt in place, no reload needed;
+  - both skins keep the four status tints (teal idle / amber active /
+    mint done / ice pending) and the per-status list text colors.
+
+## [0.6.2] - 2026-09-07
+
+### Changed
+
+- **Orb visuals cloned from the skill-browser ball, hue-shifted to the
+  todo teal identity** (user request: "和他一样呢换个颜色"):
+  - nebula-body radial gradient (bright highlight → teal nebula → deep
+    space rim) exactly mirroring the skill orb's structure;
+  - flowing nebula bands (bandFlow) + rotating conic rim light (rimSpin,
+    7s; amber status spins faster at 2.6s) + breathing pulse (orbBreathe)
+    + glowing face text (dsbGlow-style keyframes) — the full five-piece
+    skill-orb motion stack, now on the todo ball;
+  - status variants are full nebula re-tints, not overlays: amber nebula
+    + fast rim while work is in progress, mint nebula + extra glow when
+    everything is done, ice-blue nebula for pending-only, teal at idle;
+  - hover scale-up (1.08) like the sibling orbs. The thin progress ring
+    from 0.6.0 is kept underneath the rim (done/total arc).
+
+## [0.6.1] - 2026-09-07
+
+### Fixed
+
+- **Durable cross-update record survival (user clarification on "跨轮次")**:
+  the checklist and its COMPLETED history now survive every kind of update,
+  not just turn resets:
+  - every accepted snapshot is persisted to localStorage per session
+    (debounced 400ms);
+  - on startup / page refresh the persisted record is restored, taking
+    whichever side is strictly further along (progress score: done count →
+    total → recency) — a page reload can no longer drop completed items;
+  - a monotonic guard rejects incoming snapshots that would drag the
+    record backward (fewer completed items with an equal-or-larger total,
+    e.g. a stale polling snapshot), while still accepting genuine plan
+    rewrites (tasks added or total shrunk).
+
+## [0.6.0] - 2026-09-07
+
+### Fixed
+
+- **Sticky checklist (requirements 1/2/5)**: the host resets the todos
+  projection to `null` at every `turn/start`, which previously wiped the
+  ball the moment a new reply began. The last known list is now kept
+  per-session until a real `todo_write` snapshot overwrites it — the
+  checklist and progress never blink away mid-conversation, across turns,
+  and completed items stay visible the whole time.
+
+### Added
+
+- **Progress ring + flow effects (requirement 7, skill-orb style)**:
+  - a conic-gradient ring around the ball visualizing done/total (e.g.
+    1/5 → 20% arc), rotating amber flow while work is in progress and a
+    full mint ring with glow when everything is done;
+  - the face label (1/5 or ✓) now carries a matching glow;
+  - when items remain, the panel shows a hint pointing to
+    `dsh-client-auto-continue` as the driver for continuous thinking (this
+    plugin is a read-only monitor and never sends messages itself).
+
+## [0.5.1] - 2026-09-07
+
+### Changed
+
+- **Settings centralized into the shared "悬浮球导航" section** (per user
+  request): the ball's show/hide toggle now lives in the
+  dsh-skill-browser-provided settings section (which already controlled the
+  font ball the same way), alongside a promoted entry for this plugin with
+  a Star link. This plugin no longer registers its own settings section;
+  `exports.inject` is back to `["sessions"]` and `dsh.client.inject` back
+  to just `@deepseek-ai/dsh-client-runtime` — **no host restart needed**
+  when upgrading to 0.5.1 (a page refresh suffices).
+
+### Fixed
+
+- **Theme aligned with the sibling balls** (user request): the ball base is
+  back to the same dark-gem gradient as font-enhancer / skill-browser;
+  only the accent glow + ball-face text color differ (teal), with status
+  colors amber (in progress, pulsing) / mint (done) / ice blue (pending).
+  Per-status list TEXT colors are kept: amber semibold for in-progress,
+  gray-green strikethrough for completed, light gray-blue for pending.
+
+## [0.5.0] - 2026-09-07
+
+### Added
+
+- **DSH settings-page section (悬浮球设置)** — same official
+  `settings.section` slot mechanism as the skill-browser and
+  font-enhancer balls:
+  - show/hide toggle for the ball (persists in localStorage; the panel can
+    be re-enabled from settings if hidden);
+  - a "floating-ball family" list promoting the four sibling plugins
+    (font-enhancer / skill-browser / chat-image-lightbox / this one) with
+    Star links;
+  - registration follows the four verified requirements: official client
+    dependencies declared in `dsh.client.inject` (requires a host restart
+    when upgrading), pure-array `exports.inject`, no effect-wrapping, and
+    a hooks-free React component.
+- **New teal-gem theme** — distinct from the skill browser's blue-purple
+  nebula orb and font-enhancer's graphite gem, same radial-gradient glass
+  language:
+  - ball states: teal (idle) / amber pulsing (in progress) / mint (all
+    done) / ice blue (pending only), each with matching glow;
+  - per-status TEXT colors in the list: in-progress = bright amber
+    (semibold), completed = gray-green strikethrough, pending = light
+    gray-blue — no more uniform white;
+  - panel border/header rule tinted teal to match the ball.
+
+## [0.4.0] - 2026-09-07
+
+### Added
+
+- **Inline conversation rename from the ball**:
+  - click the conversation title in the panel header (or the ✏️ button on a
+    pinned row) to edit its name in place — Enter commits, Esc cancels;
+  - goes through the official session rename API (`session.rename` from
+    `dsh-client-runtime`), so the change is the same as renaming the
+    conversation in DSH itself: the sidebar, the projection store and the
+    ball all update together;
+  - works on the current session and on pinned sessions.
+
+## [0.3.0] - 2026-09-07
+
+### Fixed
+
+- **Data layer rebuilt on the official `sessions` service** (the root fix):
+  - previous versions tapped `window.fetch`/`WebSocket`, but DSH Desktop's
+    connection runs through the shell's `__DSH_TRANSPORT__` (Electron
+    `net.fetch` + renderer access header) — page-level taps never saw a
+    single frame, so the ball only ever showed collapsed-panel skeleton
+    placeholders and never followed session switches;
+  - now the plugin injects the official `sessions` service (provided by
+    `dsh-client-runtime`) and reads its list snapshot directly: every
+    session's `projectionValues.todos` and `displayTitle`, plus the current
+    session id and a subscribe() — zero interception, host-computed data;
+  - session switching now follows instantly (the snapshot's `current` field
+    is the authoritative active-session signal);
+  - pinned conversations read real per-session projection data instead of
+    guesses;
+  - the DOM observer remains as a fallback only when the sessions service
+    is unavailable; collapsed-count skeletons are now clearly marked and
+    never overwrite real data.
+- Requires `dsh.client.inject: ["@deepseek-ai/dsh-client-runtime"]` — a
+  host restart is needed when upgrading from <= 0.2.0.
+
+## [0.2.0] - 2026-09-07
+
+### Added
+
+- **Multi-session monitoring**:
+  - the ball now follows the active conversation automatically — every
+    projection frame carries `sessionId`, and the most recently seen session
+    wins (title frames update session awareness too, so even conversations
+    without todos reset the ball correctly);
+  - conversations can be **pinned** from the panel (📌 button): pinned lists
+    keep monitoring across session switches, are listed in a "pinned"
+    section with live status dots (orange pulse = in progress, green = all
+    done), expand inline to show the full list, and can be unpinned;
+  - the pinned list persists in `localStorage`; conversation titles come
+    from the `title` projection frames;
+  - when the current session has no todos but a pinned one is running, the
+    ball surfaces a "📌 in progress" hint instead of going fully idle.
+- Panel header now shows the current conversation's title.
+
+## [0.1.0] - 2026-09-06
+
+### Added
+
+- Persistent draggable floating ball showing the current session's `todo_write`
+  progress (`done/total` + active task content).
+- Click-to-toggle task panel with per-status colored items
+  (✓ completed / ▶ in progress / ○ pending) and `Esc` to fold.
+- Dual-channel data sync:
+  - `MutationObserver` over the official todo panel (`[data-testid="todo-panel"]`),
+    including localized count-label parsing for the collapsed state;
+  - passive projection-frame inspection via wrapped `window.fetch` and
+    `WebSocket.prototype.onmessage`.
+- Shadow DOM style isolation (`all:initial`).
+- Position persistence with viewport clamping; Electron-safe mount on `<html>`.
+- Loopback-only host health route `/dsh-todo-float-ball-plus/health`.
